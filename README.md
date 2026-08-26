@@ -13,6 +13,15 @@ This catches the case that actually happens: `chalk@5.6.1`, `debug@4.4.2` and
 used packages. Their clean releases sit either side of the bad one, so the
 version in your lockfile is what decides whether you are affected.
 
+## See it on your project first, in one line
+
+Before wiring it into CI, run the same check locally. No install, no account,
+no key:
+
+```bash
+curl -s https://lazaretto.dev/check --data-binary @package-lock.json
+```
+
 ## Quick start
 
 No secret to configure. Add this and a malicious pin fails the build:
