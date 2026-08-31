@@ -1,5 +1,5 @@
 name: 'Lazaretto Scan'
-description: 'Fail the build when a dependency you pinned is known malware. Lockfile check needs no API key.'
+description: 'Fail the build when a dependency you pinned is known malware, and behaviorally scan the versions each PR adds. Lockfile check needs no API key.'
 author: 'Lazaretto'
 branding:
   icon: 'shield'
@@ -7,21 +7,21 @@ branding:
 
 inputs:
   lockfile:
-    description: 'Path to a lockfile to check against the known-malicious package feed. "auto" finds package-lock.json, yarn.lock, or pnpm-lock.yaml in the workspace root. Set "" to skip. This check is free and needs no API key.'
+    description: 'Path to a lockfile to check against the known-malicious package feed. "auto" finds package-lock.json, yarn.lock, or pnpm-lock.yaml in the workspace root. Set "" to skip. This check is free, unlimited, and needs no API key.'
     required: false
     default: 'auto'
   api-key:
-    description: 'Lazaretto API key, for the OPTIONAL deep behavioral scan (store as a secret). Not needed for the lockfile check. Get one free with `curl -X POST https://lazaretto.dev/v1/trial`.'
+    description: 'Lazaretto API key. This is the only line you add to turn on behavioral scanning; everything else is inferred. Store it as a secret. Get one free with `curl -X POST https://lazaretto.dev/v1/trial`.'
     required: false
     default: ''
-  targets:
-    description: 'Newline-separated targets for the deep scan, each "type:ref". type is one of npm_package, github_repo, clawhub_skill, raw_url. Example: "npm_package:left-pad@1.3.0". Needs api-key. If empty, direct dependencies are resolved from the lockfile.'
+  deep-scan:
+    description: 'What the behavioral scan covers. "auto" (default) scans the dependency versions this pull request ADDS, and on a schedule or manual run scans the whole tree. "changed" | "all" | "none" force it. Needs api-key; without one this is always none.'
     required: false
-    default: ''
-  package-json:
-    description: 'package.json whose DIRECT dependencies the deep scan covers when `targets` is empty. Exact versions are read from the lockfile, never guessed from a range.'
+    default: 'auto'
+  max-packages:
+    description: 'Hard ceiling on packages scanned in one run, so a first install can never produce a surprise bill. One credit per package. Raise it to cover a whole large tree.'
     required: false
-    default: 'package.json'
+    default: '250'
   fail-on:
     description: 'Fail the build when the worst verdict reaches this level: malicious | flagged | never.'
     required: false
@@ -31,7 +31,7 @@ inputs:
     required: false
     default: 'true'
   github-token:
-    description: 'Token used to post the PR comment. Defaults to the workflow token.'
+    description: 'Token used to post the PR comment and read the base lockfile. Defaults to the workflow token.'
     required: false
     default: ${{ github.token }}
   base-url:
@@ -44,8 +44,14 @@ outputs:
     description: 'Number of pinned dependency versions found to be known malware.'
     value: ${{ steps.laz.outputs.malicious-count }}
   worst-verdict:
-    description: 'Worst verdict from the deep scan (malicious | flagged | clear | error | unscanned).'
+    description: 'Worst verdict from the behavioral scan (malicious | flagged | clear | error | unscanned).'
     value: ${{ steps.laz.outputs.worst-verdict }}
+  added-count:
+    description: 'Dependency versions this pull request adds, as computed against the base lockfile.'
+    value: ${{ steps.laz.outputs.added-count }}
+  credits-spent:
+    description: 'Credits billed by this run. Zero when nothing was added or no key was given.'
+    value: ${{ steps.laz.outputs.credits-spent }}
 
 runs:
   using: 'composite'
@@ -55,8 +61,8 @@ runs:
       env:
         LOCKFILE_IN: ${{ inputs.lockfile }}
         LAZ_KEY: ${{ inputs.api-key }}
-        TARGETS: ${{ inputs.targets }}
-        PKG_JSON: ${{ inputs.package-json }}
+        DEEP_SCAN: ${{ inputs.deep-scan }}
+        MAX_PKGS: ${{ inputs.max-packages }}
         FAIL_ON: ${{ inputs.fail-on }}
         COMMENT: ${{ inputs.comment }}
         GH_TOKEN: ${{ inputs.github-token }}
@@ -126,44 +132,134 @@ runs:
         fi
 
         # ------------------------------------------------------------------
-        # 2) Deep behavioral scan. Optional, needs a key and credits.
+        # 2) Behavioral scan of what this PR ADDS.
+        #
+        #    The free check above answers "is anything I pinned known malware",
+        #    which recurs forever and costs nothing. This answers "what does the
+        #    code actually do", for the versions ENTERING the repo. That is the
+        #    moment unreviewed third-party code arrives, and the moment identity
+        #    is weakest: a brand-new malicious release has no advisory yet.
+        #
+        #    A PR that adds no dependencies scans nothing and costs nothing.
         # ------------------------------------------------------------------
-        list="$(mktemp)"
-        if [ -n "${TARGETS//[[:space:]]/}" ]; then
-          printf '%s\n' "$TARGETS" | sed '/^[[:space:]]*$/d' > "$list"
-        elif [ -n "${LAZ_KEY//[[:space:]]/}" ] && [ -f "$PKG_JSON" ] && [ -f package-lock.json ]; then
-          # Direct deps at the versions ACTUALLY INSTALLED, read from the lock.
-          # Never derive a version by stripping a range operator: "^5.0.0" would
-          # become 5.0.0, and a verdict about 5.0.0 says nothing about the 5.6.1
-          # that npm would install. That is a report about the wrong artifact.
-          jq -r --slurpfile lock package-lock.json '
-            ((.dependencies // {}) + (.devDependencies // {})) | keys[] as $n
-            | ($lock[0].packages["node_modules/" + $n].version // empty) as $v
-            | "npm_package:\($n)@\($v)"
-          ' "$PKG_JSON" 2>/dev/null > "$list"
+        api="${GITHUB_API_URL:-https://api.github.com}"
+        mode="${DEEP_SCAN}"
+        threshold="$(rank "$FAIL_ON")"
+        added_count=0; spent=0; worst=0; worst_v="unscanned"; scanned=0
+        paywalled=""; scan_note=""
+
+        if [ -z "${LAZ_KEY//[[:space:]]/}" ]; then
+          # Silence here is the worst answer: somebody who asked for a
+          # behavioral scan and mistyped the secret name would otherwise see a
+          # green run that scanned nothing. Say exactly what is missing.
+          if [ "$mode" = "changed" ] || [ "$mode" = "all" ]; then
+            echo "::warning title=Lazaretto::deep-scan is '${mode}' but no api-key was given, so no behavioral scan ran. The free identity check above still did. Add: api-key: \${{ secrets.LAZARETTO_API_KEY }}"
+            scan_note="\`deep-scan\` was set to \`${mode}\` but no \`api-key\` was given, so nothing was behaviorally scanned. The free identity check above still ran."
+          fi
+          mode="none"
+        elif [ "$mode" = "auto" ]; then
+          case "${GITHUB_EVENT_NAME:-}" in
+            pull_request|pull_request_target) mode="changed";;
+            schedule|workflow_dispatch)       mode="all";;
+            *)                                mode="none";;
+          esac
         fi
 
-        threshold="$(rank "$FAIL_ON")"
-        worst=0; worst_v="clear"; count=0
-        if [ -s "$list" ] && [ -n "${LAZ_KEY//[[:space:]]/}" ]; then
-          while IFS= read -r line; do
-            [ -z "${line//[[:space:]]/}" ] && continue
-            typ="${line%%:*}"; ref="${line#*:}"
-            count=$((count+1))
-            body="$(jq -n --arg t "$typ" --arg r "$ref" '{target:{type:$t,ref:$r},depth:"full"}')"
-            resp="$(curl -fsS -H 'content-type: application/json' -H "x-api-key: ${LAZ_KEY}" -X POST "${BASE_URL}/v1/scan" -d "$body" 2>/dev/null)" || resp='{"verdict":"error"}'
-            v="$(printf '%s' "$resp" | jq -r '.verdict // "error"')"
-            rk="$(printf '%s' "$resp" | jq -r '.risk // "none"')"
-            n="$(printf '%s' "$resp" | jq -r '(.findings // []) | length')"
-            printf '| `%s` | %s %s | %s | %s |\n' "$ref" "$(icon "$v")" "$v" "$rk" "$n" >> "$rows"
-            echo "lazaretto: ${typ}:${ref} -> ${v} (risk ${rk}, ${n} signals)"
-            r="$(rank "$v")"; if [ "$r" -gt "$worst" ]; then worst="$r"; worst_v="$v"; fi
-          done < "$list"
-        elif [ ! -s "$list" ] && [ -n "${LAZ_KEY//[[:space:]]/}" ]; then
-          echo 'lazaretto: no deep-scan targets. Set the targets input, or add a package-lock.json so exact installed versions can be resolved.'
-          worst_v="unscanned"
-        else
-          worst_v="unscanned"
+        pkglist="$(mktemp)"   # newline-delimited name@version
+        if [ "$mode" = "changed" ] && [ -n "$lockfile" ]; then
+          base_sha="$(jq -r '.pull_request.base.sha // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null)"
+          if [ -z "$base_sha" ]; then
+            echo "::warning title=Lazaretto::no pull_request base commit; skipping the behavioral scan."
+            scan_note="No base commit was available, so nothing was compared. This is not an all-clear."
+          else
+            # Read the base lockfile through the API rather than git, so a
+            # shallow checkout (the default) does not silently defeat this.
+            base_lock="$(mktemp)"
+            bcode="$(curl -sS -o "$base_lock" -w '%{http_code}' --max-time 60 \
+                      -H "authorization: Bearer ${GH_TOKEN}" -H 'accept: application/vnd.github.raw' \
+                      "${api}/repos/${GITHUB_REPOSITORY}/contents/${lockfile}?ref=${base_sha}" 2>/dev/null || echo 000)"
+            if [ "$bcode" != "200" ]; then
+              echo "::warning title=Lazaretto::could not read ${lockfile} at the base commit (HTTP ${bcode}); skipping the behavioral scan."
+              scan_note="The base lockfile could not be read, so nothing was compared. This is not an all-clear."
+            else
+              dpayload="$(jq -n --rawfile b "$base_lock" --rawfile h "$lockfile" '{base:$b,head:$h}')"
+              dresp="$(mktemp)"
+              dcode="$(curl -sS -o "$dresp" -w '%{http_code}' --max-time 120 -X POST "${BASE_URL}/v1/lockfile/diff" \
+                        -H 'content-type: application/json' -d "$dpayload" 2>/dev/null || echo 000)"
+              if [ "$dcode" = "200" ]; then
+                added_count="$(jq -r '.added | length' "$dresp")"
+                jq -r '.added[] | "\(.name)@\(.version)"' "$dresp" > "$pkglist"
+                up="$(jq -r '.upgraded | length' "$dresp")"
+                echo "lazaretto: this PR adds ${added_count} dependency version(s) (${up} upgrade(s))."
+              else
+                echo "::warning title=Lazaretto::could not diff the lockfiles (HTTP ${dcode}); skipping the behavioral scan."
+                scan_note="The lockfiles could not be compared, so nothing was scanned. This is not an all-clear."
+              fi
+            fi
+          fi
+        elif [ "$mode" = "all" ] && [ -n "$lockfile" ]; then
+          # Whole tree: diff against an EMPTY lockfile, so every pinned version
+          # comes back as "added". Reuses the server-side parser rather than
+          # teaching bash to read three lockfile formats, and this is the run a
+          # free tier cannot cover, which is why it belongs on a schedule and
+          # not on every push.
+          dresp="$(mktemp)"
+          dpayload="$(jq -n --rawfile h "$lockfile" '{base:"{\"lockfileVersion\":3,\"packages\":{}}",head:$h}')"
+          dcode="$(curl -sS -o "$dresp" -w '%{http_code}' --max-time 120 -X POST "${BASE_URL}/v1/lockfile/diff" \
+                    -H 'content-type: application/json' -d "$dpayload" 2>/dev/null || echo 000)"
+          if [ "$dcode" = "200" ]; then
+            jq -r '.added[] | "\(.name)@\(.version)"' "$dresp" > "$pkglist"
+            added_count="$(wc -l < "$pkglist" | tr -d ' ')"
+            echo "lazaretto: whole-tree scan of ${added_count} pinned version(s)."
+          else
+            echo "::warning title=Lazaretto::could not enumerate the tree (HTTP ${dcode}). This is NOT an all-clear."
+            scan_note="The dependency tree could not be enumerated, so nothing was scanned. This is not an all-clear."
+          fi
+        fi
+
+        # Ceiling, so a first install can never produce a surprise bill.
+        total_wanted="$(wc -l < "$pkglist" | tr -d ' ')"
+        if [ "${MAX_PKGS}" -gt 0 ] && [ "$total_wanted" -gt "${MAX_PKGS}" ]; then
+          head -n "${MAX_PKGS}" "$pkglist" > "${pkglist}.capped" && mv "${pkglist}.capped" "$pkglist"
+          scan_note="${scan_note} Capped at **${MAX_PKGS}** of ${total_wanted} packages by \`max-packages\`; the rest were NOT scanned."
+          echo "::warning title=Lazaretto::capped at ${MAX_PKGS} of ${total_wanted} packages. Raise max-packages to cover the rest."
+        fi
+
+        if [ -s "$pkglist" ] && [ "$mode" != "none" ]; then
+          echo "lazaretto: behavioral scan of $(wc -l < "$pkglist" | tr -d ' ') package(s); one credit each."
+          # The batch endpoint takes 25 per call.
+          split -l 25 "$pkglist" "${pkglist}.chunk." 2>/dev/null || true
+          for chunk in "${pkglist}".chunk.*; do
+            [ -f "$chunk" ] || continue
+            bpayload="$(jq -R -s -c 'split("\n") | map(select(length>0)) | map(
+                          (. | capture("^(?<n>.+)@(?<v>[^@]+)$")) | {name:.n, version:.v}
+                        ) | {packages: .}' < "$chunk")"
+            bresp="$(mktemp)"
+            bcode2="$(curl -sS -o "$bresp" -w '%{http_code}' --max-time 300 -X POST "${BASE_URL}/v1/scan/batch" \
+                       -H 'content-type: application/json' -H "x-api-key: ${LAZ_KEY}" -d "$bpayload" 2>/dev/null || echo 000)"
+            case "$bcode2" in
+              200)
+                spent=$(( spent + $(jq -r '.billed_credits // 0' "$bresp") ))
+                scanned=$(( scanned + $(jq -r '.scanned // 0' "$bresp") ))
+                jq -r '.results[] | "| `\(.name)@\(.version)` | \(if .verdict=="malicious" then "🔴" elif .verdict=="flagged" then "🟠" elif .verdict=="clear" then "🟢" else "⚪" end) \(.verdict) | \(.risk // "none") | \((.findings // []) | length) |"' "$bresp" >> "$rows" 2>/dev/null || true
+                wv="$(jq -r '.worst_verdict.verdict // "clear"' "$bresp")"
+                r="$(rank "$wv")"; if [ "$r" -gt "$worst" ]; then worst="$r"; worst_v="$wv"; fi
+                jq -r '.results[] | select(.verdict=="malicious") | "::error title=Lazaretto::\(.name)@\(.version) is malicious (risk \(.risk))."' "$bresp" 2>/dev/null || true
+                ;;
+              401|402)
+                paywalled="$(jq -r '.detail // .error // "payment required"' "$bresp" 2>/dev/null)"
+                echo "::warning title=Lazaretto::behavioral scan needs credits: ${paywalled}"
+                break
+                ;;
+              *)
+                echo "::warning title=Lazaretto::behavioral scan unavailable (HTTP ${bcode2}). This is NOT an all-clear."
+                break
+                ;;
+            esac
+          done
+          [ "$scanned" -gt 0 ] && [ "$worst_v" = "unscanned" ] && worst_v="clear"
+        elif [ "$mode" != "none" ] && [ -z "$scan_note" ]; then
+          echo "lazaretto: this pull request adds no dependency versions; nothing to scan, nothing billed."
         fi
 
         # ------------------------------------------------------------------
@@ -172,7 +268,7 @@ runs:
         {
           if [ "$mal_count" -gt 0 ]; then
             echo "## 🔴 Lazaretto: ${mal_count} known-malicious dependenc$([ "$mal_count" -eq 1 ] && echo y || echo ies)"
-          elif [ "$lock_ran" = "1" ] || [ "$count" -gt 0 ]; then
+          elif [ "$lock_ran" = "1" ] || [ "$scanned" -gt 0 ]; then
             echo "## $(icon "$worst_v") Lazaretto scan"
           else
             echo "## ⚫ Lazaretto: nothing checked"
@@ -190,21 +286,41 @@ runs:
           if [ -s "$rows" ]; then
             echo "### Behavioral scan"
             echo
-            echo "| target | verdict | risk | signals |"
+            if [ "$mode" = "changed" ]; then
+              echo "Scanned the **${added_count}** dependency version(s) this pull request adds."
+            else
+              echo "Whole-tree scan."
+            fi
+            echo
+            echo "| package | verdict | risk | signals |"
             echo "| --- | --- | --- | --- |"
             cat "$rows"
             echo
-            echo "Scanned **${count}** target(s). Worst verdict: **${worst_v}**."
+            echo "**${scanned}** scanned, **${spent}** credit(s) billed. Worst verdict: **${worst_v}**."
+            echo
+          elif [ "$mode" = "changed" ] && [ "$added_count" = "0" ] && [ -z "$scan_note" ]; then
+            echo "### Behavioral scan"
+            echo
+            echo "This pull request adds no dependency versions, so nothing was scanned and nothing was billed."
+            echo
+          fi
+          [ -n "$scan_note" ] && { echo "> ${scan_note}"; echo; }
+          if [ -n "$paywalled" ]; then
+            echo "> **Behavioral scan stopped: out of credits.** ${paywalled}"
+            echo ">"
+            echo "> The free dependency identity check above still ran. Top up at ${BASE_URL}/#pricing."
             echo
           fi
           echo "Automated signals with evidence, not a warranty. \`clear\` means no known-bad match and no rule fired."
           echo
-          echo "<sub>Powered by [Lazaretto](${BASE_URL}) · the lockfile check is free and needs no API key.</sub>"
+          echo "<sub>Powered by [Lazaretto](${BASE_URL}) · the dependency identity check is free, unlimited, and needs no API key.</sub>"
         } > "$report"
         [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
 
         echo "malicious-count=${mal_count}" >> "${GITHUB_OUTPUT:-/dev/null}"
         echo "worst-verdict=${worst_v}" >> "${GITHUB_OUTPUT:-/dev/null}"
+        echo "added-count=${added_count}" >> "${GITHUB_OUTPUT:-/dev/null}"
+        echo "credits-spent=${spent}" >> "${GITHUB_OUTPUT:-/dev/null}"
 
         # Sticky PR comment (create or update the single Lazaretto comment).
         if [ "${COMMENT}" = "true" ] && [ -n "${GH_TOKEN//[[:space:]]/}" ] && [ -f "${GITHUB_EVENT_PATH:-/nonexistent}" ]; then
