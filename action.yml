@@ -153,7 +153,7 @@ runs:
           # behavioral scan and mistyped the secret name would otherwise see a
           # green run that scanned nothing. Say exactly what is missing.
           if [ "$mode" = "changed" ] || [ "$mode" = "all" ]; then
-            echo "::warning title=Lazaretto::deep-scan is '${mode}' but no api-key was given, so no behavioral scan ran. The free identity check above still did. Add: api-key: \${{ secrets.LAZARETTO_API_KEY }}"
+            echo "::warning title=Lazaretto::deep-scan is '${mode}' but no api-key was given, so no behavioral scan ran. The free identity check above still did. Pass api-key from a repository secret; see the README."
             scan_note="\`deep-scan\` was set to \`${mode}\` but no \`api-key\` was given, so nothing was behaviorally scanned. The free identity check above still ran."
           fi
           mode="none"
