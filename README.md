@@ -1,140 +1,105 @@
-# Lazaretto Scan (GitHub Action)
+# Lazaretto Scan
 
-Fail the build when a dependency you actually pinned is known malware.
+Fail the build when a dependency you pinned is known malware, and behaviorally scan the versions each pull request **adds**.
 
-The action reads your lockfile and checks every pinned version against published
-malicious-package advisories (OSV / OpenSSF). **That check is free, needs no API
-key, and is one request for your whole dependency tree.** An optional deep
-behavioral scan is available on top, for artifacts you want analyzed rather than
-just identified.
-
-This catches the case that actually happens: `chalk@5.6.1`, `debug@4.4.2` and
-`@ledgerhq/connect-kit@1.1.6` were compromised releases of legitimate, widely
-used packages. Their clean releases sit either side of the bad one, so the
-version in your lockfile is what decides whether you are affected.
-
-## See it on your project first, in one line
-
-Before wiring it into CI, run the same check locally. No install, no account,
-no key:
-
-```bash
-curl -s https://lazaretto.dev/check --data-binary @package-lock.json
-```
-
-## Quick start
-
-No secret to configure. Add this and a malicious pin fails the build:
+The dependency identity check is **free, unlimited, and needs no API key**. Copy this in and you are done:
 
 ```yaml
 name: Lazaretto
-on:
-  pull_request:
-    paths: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']
+on: [pull_request]
 permissions:
   contents: read
-  pull-requests: write # so the action can post its comment
+  pull-requests: write
 jobs:
-  deps:
+  scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: jamesdfinance-dev/lazaretto-scan-action@v1
+      - uses: actions/checkout@v4
+      - uses: jamesdfinance-dev/lazaretto-scan-action@v2
 ```
 
-Supported lockfiles, auto-detected: `package-lock.json`, `npm-shrinkwrap.json`,
-`yarn.lock` (v1 and Berry), `pnpm-lock.yaml` (v5, v6, v9).
+That checks every exactly pinned version in your `package-lock.json`, `yarn.lock` or `pnpm-lock.yaml` against published malicious-package advisories (OSV and OpenSSF), fails the build on a match, and leaves a single sticky comment on the PR that updates itself.
 
-## Adding the deep behavioral scan
+## Adding the behavioral scan
 
-The lockfile check answers "is this package known malware". The deep scan
-answers "what does this artifact actually do": credential access, exfiltration,
-obfuscation, install scripts, prompt injection aimed at an agent, with the file
-and line for each signal. That part uses credits, so it needs a key.
+The identity check answers *"is anything I pinned known malware"*. It cannot answer *"what does this code actually do"*, and it is weakest exactly when a brand-new malicious release lands, because there is no advisory to match yet.
+
+Add one line to answer that too:
 
 ```yaml
-      - uses: jamesdfinance-dev/lazaretto-scan-action@v1
+      - uses: jamesdfinance-dev/lazaretto-scan-action@v2
         with:
           api-key: ${{ secrets.LAZARETTO_API_KEY }}
 ```
 
-With a key and no explicit `targets`, the action deep-scans your **direct**
-dependencies at the exact versions in `package-lock.json`. You can also name
-targets yourself:
+Everything else is inferred. On a pull request it scans **only the dependency versions the PR adds**, so a PR that changes no dependencies scans nothing and costs nothing, and a Dependabot or Renovate PR costs one credit per new version. On a `schedule` or a manual run it scans the whole tree.
 
-```yaml
-      - uses: jamesdfinance-dev/lazaretto-scan-action@v1
-        with:
-          api-key: ${{ secrets.LAZARETTO_API_KEY }}
-          targets: |
-            npm_package:left-pad@1.3.0
-            github_repo:some-org/some-skill
-```
-
-Get a free developer key (a daily scan allowance, no signup, no card):
+Get a key:
 
 ```bash
-curl -s -X POST https://lazaretto.dev/v1/trial   # returns an api_key
+curl -X POST https://lazaretto.dev/v1/trial
 ```
 
-Store it as a repo secret. For CI volume, buy a capacity pack at
-https://lazaretto.dev/#pricing. An agent can also pay per call over x402.
+Then add it as a repository secret named `LAZARETTO_API_KEY`.
 
-## What it reports
+### The weekly whole-tree scan
 
-On a pull request the action posts one sticky comment (created once, updated on
-each run), and always writes a job summary. Both show which pinned versions are
-known malware with a link to the advisory, and, when the deep scan ran, the
-verdict and `risk` level per target.
+Per-PR scanning only ever sees what changes. This covers everything you already have:
 
-Set `comment: false` to turn the comment off.
+```yaml
+name: Lazaretto weekly
+on:
+  schedule: [{ cron: '17 4 * * 1' }]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jamesdfinance-dev/lazaretto-scan-action@v2
+        with:
+          api-key: ${{ secrets.LAZARETTO_API_KEY }}
+          max-packages: '250'
+```
+
+## Cost
+
+One credit per package that produces a verdict. A package that errors is never billed. `max-packages` is a hard ceiling per run, defaulting to **250**, so a first install cannot produce a surprise bill; the run says plainly when it capped and what it skipped.
+
+`credits-spent` is an output, so you can assert on it.
 
 ## Inputs
 
-| input | default | description |
+| input | default | what it does |
 | --- | --- | --- |
-| `lockfile` | `auto` | Lockfile to check. `auto` finds the usual names in the workspace root. Set `""` to skip. No API key needed. |
-| `api-key` | (none) | Key for the optional deep behavioral scan. Not needed for the lockfile check. |
-| `targets` | (none) | Newline list of `type:ref` for the deep scan. `type` is `npm_package`, `github_repo`, `clawhub_skill`, or `raw_url`. |
-| `package-json` | `package.json` | Direct deps the deep scan covers when `targets` is empty. Versions come from the lockfile. |
-| `fail-on` | `malicious` | Fail the build at this level: `malicious`, `flagged`, or `never`. |
-| `comment` | `true` | On a PR, post/update a sticky comment (needs `pull-requests: write`). |
-| `github-token` | workflow token | Token used to post the comment. |
+| `lockfile` | `auto` | Lockfile to check. `auto` finds package-lock.json, yarn.lock or pnpm-lock.yaml. `""` skips. |
+| `api-key` | `''` | Turns on the behavioral scan. Without it only the free identity check runs. |
+| `deep-scan` | `auto` | `auto` scans what a PR adds, and the whole tree on a schedule or manual run. Force with `changed`, `all` or `none`. |
+| `max-packages` | `250` | Hard ceiling on packages scanned per run. One credit each. |
+| `fail-on` | `malicious` | Fail at `malicious`, `flagged`, or `never`. |
+| `comment` | `true` | Post and update a sticky PR comment. Needs `pull-requests: write`. |
+| `github-token` | workflow token | Used to post the comment and read the base lockfile. |
 | `base-url` | `https://lazaretto.dev` | API base URL. |
 
 ## Outputs
 
-| output | description |
+| output | meaning |
 | --- | --- |
-| `malicious-count` | Number of pinned versions found to be known malware. |
-| `worst-verdict` | Worst deep-scan verdict, or `unscanned` if the deep scan did not run. |
+| `malicious-count` | Pinned versions found to be known malware. |
+| `worst-verdict` | `malicious`, `flagged`, `clear`, `error` or `unscanned`. |
+| `added-count` | Dependency versions this PR adds. |
+| `credits-spent` | Credits billed by this run. |
 
-## What it does not claim
+## What it does not do
 
-A known-malware hit fails the build at any `fail-on` except `never`: that is a
-published advisory naming an exact version, not a heuristic.
+A known-malware match is a published advisory saying that exact version is malware, so it fails the build at any threshold except `never`. Everything else is an automated signal with evidence attached, not a warranty. A `clear` result means nothing matched and no rule fired; it is not a statement that an artifact carries no risk.
 
-Everything else is reported honestly rather than optimistically:
+If our API is unreachable the step warns loudly and does not report a clean run. An outage is not an all-clear.
 
-- Versions we could not check are listed separately. An empty malicious list is
-  an all-clear only when nothing is sitting in the unverified column.
-- Entries with no published identity (`file:`, `link:`, `workspace:`, git) are
-  counted and named as skipped, because "we checked 1325 of your 1432 entries"
-  and "you are clean" are different statements.
-- If the service is unreachable the step warns loudly and does not fail your
-  build, but it does not report a pass either.
-- Only exact versions are checked. A range like `^5.0.0` has no honest answer,
-  since the compromised release usually sits between clean ones.
+Reading the base lockfile on a PR uses the GitHub API rather than git history, so a shallow checkout does not silently disable the diff.
 
-`clear` means no known-bad match and no rule fired. It is not a statement that a
-package is risk-free.
+---
 
-## Cost
-
-The lockfile check is free and unmetered (rate limited per IP). Only the
-optional deep scan uses credits, one per target per run. Gate the job on
-lockfile changes, as in the quick start, so it runs when something changed.
-
-## License
-
-MIT. The Lazaretto service and its detection engine are separate and proprietary.
+[Lazaretto](https://lazaretto.dev) · [API docs](https://lazaretto.dev/docs/api) · [real incidents we catch](https://lazaretto.dev/caught)
