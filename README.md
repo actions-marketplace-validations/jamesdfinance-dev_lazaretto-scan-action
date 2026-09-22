@@ -68,7 +68,7 @@ jobs:
 
 One credit per package that produces a verdict. A package that errors is never billed. `max-packages` is a hard ceiling per run, defaulting to **250**, so a first install cannot produce a surprise bill; the run says plainly when it capped and what it skipped.
 
-If the key runs out of credits partway through, the versions it could pay for are scanned and the step warns with one line saying how many were not, with a link to top up at [lazaretto.dev/buy](https://lazaretto.dev/buy). Running out of credits never fails the build, and the PR comment says how many versions were not scanned.
+If the key runs out of credits partway through, the versions it could pay for are scanned and the step warns with one line saying how many were not, with a link to top up at [lazaretto.dev/buy](https://lazaretto.dev/buy). Running out of credits never fails the build, and the PR comment says how many versions were not scanned. A version skipped for another reason, such as the scan running out of time, is not billed and is not counted as out of credits; the comment lists it under incomplete coverage.
 
 `credits-spent`, `not-scanned-count` and `credits-remaining` are outputs, so you can assert on them.
 

@@ -78,6 +78,8 @@ runs:
 
         rank() { case "$1" in malicious) echo 3;; flagged) echo 2;; clear) echo 1;; *) echo 0;; esac; }
         icon() { case "$1" in malicious) echo '🔴';; flagged) echo '🟠';; clear) echo '🟢';; error) echo '⚪';; *) echo '⚫';; esac; }
+        # not_scanned.by_reason.<reason> from a batch response, as a whole number.
+        ns_reason() { jq -r --arg k "$2" '(.not_scanned.by_reason[$k] // 0) | if type == "number" and . > 0 then floor else 0 end' "$1" 2>/dev/null || echo 0; }
 
         report="$(mktemp)"; rows="$(mktemp)"; lockrows="$(mktemp)"
         mal_count=0; lock_ran=0; lock_note=""
@@ -157,7 +159,9 @@ runs:
         to_scan=0       # versions handed to the behavioral scan (after the cap)
         sent=0          # versions in batches that came back 200
         short=0         # versions not scanned because the key ran out of credits
-        other_ns=0      # versions not scanned for any other reason (e.g. time)
+        time_ns=0       # versions not scanned because the batch ran out of time
+        cap_ns=0        # versions not scanned because of the per-call cap
+        other_ns=0      # versions not scanned for a reason the server did not break out
         errored_n=0     # versions whose analysis did not complete (never billed)
         partial_n=0     # versions that could only be partly read
         incomplete=0    # any batch reported complete_coverage=false
@@ -276,7 +280,21 @@ runs:
                 # read as a full one.
                 ns="$(jq -r '.not_scanned.count // 0' "$bresp" 2>/dev/null || echo 0)"
                 if [ "$ns" -gt 0 ]; then
-                  if jq -e '((.not_scanned.reasons // []) | any(test("credit"; "i"))) or (.remaining_credits == 0)' "$bresp" >/dev/null 2>&1; then
+                  if jq -e '.not_scanned.by_reason | type == "object"' "$bresp" >/dev/null 2>&1; then
+                    # The server says how many went unscanned for each reason.
+                    # Only the credit-short ones belong in the top-up warning: a
+                    # version skipped for time or the per-call cap had its credit
+                    # refunded, and a top-up would not have scanned it.
+                    c="$(ns_reason "$bresp" credits)"; [ "$c" -le "$ns" ] || c="$ns"
+                    t="$(ns_reason "$bresp" time)";    [ "$t" -le $(( ns - c )) ] || t=$(( ns - c ))
+                    k="$(ns_reason "$bresp" cap)";     [ "$k" -le $(( ns - c - t )) ] || k=$(( ns - c - t ))
+                    short=$(( short + c ))
+                    time_ns=$(( time_ns + t ))
+                    cap_ns=$(( cap_ns + k ))
+                    other_ns=$(( other_ns + ns - c - t - k ))
+                  elif jq -e '((.not_scanned.reasons // []) | any(test("credit"; "i"))) or (.remaining_credits == 0)' "$bresp" >/dev/null 2>&1; then
+                    # Older servers send only free-text reasons, so the whole
+                    # count is attributed to credits when any reason names them.
                     short=$(( short + ns ))
                   else
                     other_ns=$(( other_ns + ns ))
@@ -364,6 +382,8 @@ runs:
           # Anything the API said it did not fully cover, other than credits
           # (which get their own block below).
           gaps=""
+          [ "$time_ns" -gt 0 ] && gaps="${gaps}, **${time_ns}** not scanned because the scan ran out of time (not billed)"
+          [ "$cap_ns" -gt 0 ] && gaps="${gaps}, **${cap_ns}** not scanned because of the per-call package cap (not billed)"
           [ "$other_ns" -gt 0 ] && gaps="${gaps}, **${other_ns}** not scanned"
           [ "$errored_n" -gt 0 ] && gaps="${gaps}, **${errored_n}** could not be analyzed (not billed)"
           [ "$partial_n" -gt 0 ] && gaps="${gaps}, **${partial_n}** could only be partly read"
