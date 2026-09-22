@@ -420,7 +420,9 @@ runs:
             api="${GITHUB_API_URL:-https://api.github.com}"; repo="${GITHUB_REPOSITORY}"; marker="<!-- lazaretto-scan -->"
             cbody="$(printf '%s\n%s' "$marker" "$(cat "$report")")"
             payload="$(jq -n --arg b "$cbody" '{body:$b}')"
-            existing="$(curl -fsS -H "authorization: Bearer ${GH_TOKEN}" -H 'accept: application/vnd.github+json' "${api}/repos/${repo}/issues/${pr}/comments?per_page=100" 2>/dev/null | jq -r --arg m "$marker" 'map(select(.body // "" | contains($m))) | .[0].id // empty')"
+            # The runner uses bash -e, so a listing the token may not read (a
+            # 403 on a private repo) would otherwise end the step right here.
+            existing="$(curl -fsS -H "authorization: Bearer ${GH_TOKEN}" -H 'accept: application/vnd.github+json' "${api}/repos/${repo}/issues/${pr}/comments?per_page=100" 2>/dev/null | jq -r --arg m "$marker" 'map(select(.body // "" | contains($m))) | .[0].id // empty')" || existing=""
             if [ -n "${existing}" ]; then
               curl -fsS -X PATCH -H "authorization: Bearer ${GH_TOKEN}" -H 'accept: application/vnd.github+json' "${api}/repos/${repo}/issues/comments/${existing}" -d "$payload" >/dev/null 2>&1 && echo "lazaretto: updated PR comment" || echo "::warning title=Lazaretto::could not update the PR comment"
             else
