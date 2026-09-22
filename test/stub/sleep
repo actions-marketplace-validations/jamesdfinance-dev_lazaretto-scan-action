@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Stand-in for sleep, used by test/run-block.sh. It never waits: it logs how
+# long the step asked to wait, one line per call, to $STUB_DIR/sleep.log.
+echo "$*" >> "${STUB_DIR:?STUB_DIR is not set}/sleep.log"

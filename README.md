@@ -93,7 +93,7 @@ If the key runs out of credits partway through, the versions it could pay for ar
 | `worst-verdict` | Worst verdict across every scanned version: `malicious`, `flagged`, `clear`, or `unscanned` when nothing got a verdict. `fail-on` is checked against this. |
 | `added-count` | Dependency versions this PR adds. |
 | `credits-spent` | Credits billed by this run. |
-| `not-scanned-count` | Versions sent for the behavioral scan that got no verdict (out of credits, out of time, an analysis error, or the scan was unavailable). |
+| `not-scanned-count` | Versions sent for the behavioral scan that got no verdict (out of credits, out of time, an analysis error, rate limited after 3 retries, or the scan was unavailable). |
 | `credits-remaining` | Credits left on the key after this run, as reported by the API. Empty when unknown. |
 
 ## What it does not do
@@ -101,6 +101,8 @@ If the key runs out of credits partway through, the versions it could pay for ar
 A known-malware match is a published advisory saying that exact version is malware, so it fails the build at any threshold except `never`. Everything else is an automated signal with evidence attached, not a warranty. A `clear` result means nothing matched and no rule fired; it is not a statement that an artifact carries no risk.
 
 If our API is unreachable the step warns loudly and does not report a clean run. An outage is not an all-clear.
+
+The API takes 6 behavioral scan calls a minute per key, 25 versions each. A run that meets that limit waits as long as the API asks, at most 60 seconds at a time, and sends the same batch again, up to 3 times. If it is still limited after that, the step warns with how many versions were not scanned and does not report a clean run.
 
 Reading the base lockfile on a PR uses the GitHub API rather than git history, so a shallow checkout does not silently disable the diff.
 

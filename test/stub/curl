@@ -5,13 +5,15 @@
 #
 # Keys: lockfile, diff, base (the base lockfile read), comments (list),
 # comment_create, comment_update, and batch.1, batch.2, ... for the Nth call
-# to /v1/scan/batch. A key with no .code file answers 404.
+# to /v1/scan/batch. A key with no .code file answers 404. An optional
+# <key>.headers file holds response header lines, written out for -D.
 set -u
 
-out=""; fmt=""; method=""; url=""; fail=0; data=""
+out=""; fmt=""; method=""; url=""; fail=0; data=""; hdr=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2;;
+    -D|--dump-header) hdr="$2"; shift 2;;
     -w) fmt="$2"; shift 2;;
     -X) method="$2"; shift 2;;
     -H|--max-time) shift 2;;
@@ -52,6 +54,14 @@ fi
 if [ "$fail" = "1" ] && [ "$code" -ge 400 ]; then
   echo "curl: (22) The requested URL returned error: ${code}" >&2
   exit 22
+fi
+
+if [ -n "$hdr" ]; then
+  {
+    printf 'HTTP/1.1 %s\r\n' "$code"
+    [ -f "$d/$key.headers" ] && while IFS= read -r h; do printf '%s\r\n' "$h"; done < "$d/$key.headers"
+    printf '\r\n'
+  } > "$hdr"
 fi
 
 body="$d/$key.body"

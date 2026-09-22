@@ -53,7 +53,7 @@ outputs:
     description: 'Credits billed by this run. Zero when nothing was added or no key was given.'
     value: ${{ steps.laz.outputs.credits-spent }}
   not-scanned-count:
-    description: 'Dependency versions sent for the behavioral scan that got no verdict: out of credits, out of time, an analysis error, or the scan was unavailable. Anything left out by max-packages is not counted here.'
+    description: 'Dependency versions sent for the behavioral scan that got no verdict: out of credits, out of time, an analysis error, rate limited after 3 retries, or the scan was unavailable. Anything left out by max-packages is not counted here.'
     value: ${{ steps.laz.outputs.not-scanned-count }}
   credits-remaining:
     description: 'Credits left on the key after this run, as reported by the API. Empty when no behavioral scan response carried it.'
@@ -255,9 +255,31 @@ runs:
             bpayload="$(jq -R -s -c 'split("\n") | map(select(length>0)) | map(
                           (. | capture("^(?<n>.+)@(?<v>[^@]+)$")) | {name:.n, version:.v}
                         ) | {packages: .}' < "$chunk")"
-            bresp="$(mktemp)"
-            bcode2="$(curl -sS -o "$bresp" -w '%{http_code}' --max-time 300 -X POST "${BASE_URL}/v1/scan/batch" \
-                       -H 'content-type: application/json' -H "x-api-key: ${LAZ_KEY}" -d "$bpayload" 2>/dev/null || echo 000)"
+            bresp="$(mktemp)"; bhdr="$(mktemp)"; tries=0
+            # The server allows 6 batch calls a minute per key, so a run of more
+            # than 6 chunks can meet a 429 partway through. That is a pause, not
+            # an outage: wait as long as the server asks (Retry-After, else
+            # retry_after_seconds, else 10s, never more than 60s a wait) and
+            # send the same chunk again, up to 3 times. sleep is found on PATH,
+            # so test/stub/sleep stands in for it in the harness.
+            while :; do
+              : > "$bhdr"
+              bcode2="$(curl -sS -D "$bhdr" -o "$bresp" -w '%{http_code}' --max-time 300 -X POST "${BASE_URL}/v1/scan/batch" \
+                         -H 'content-type: application/json' -H "x-api-key: ${LAZ_KEY}" -d "$bpayload" 2>/dev/null || echo 000)"
+              [ "$bcode2" = "429" ] && [ "$tries" -lt 3 ] || break
+              tries=$(( tries + 1 ))
+              wait_s="$(grep -i '^retry-after:' "$bhdr" 2>/dev/null | tail -n 1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]' || true)"
+              case "$wait_s" in
+                ''|*[!0-9]*) wait_s="$(jq -r '.retry_after_seconds // empty | if type == "number" and . >= 0 then ceil else empty end' "$bresp" 2>/dev/null || true)";;
+              esac
+              case "$wait_s" in ''|*[!0-9]*) wait_s=10;; esac
+              [ "${#wait_s}" -le 3 ] || wait_s=60
+              wait_s=$(( 10#$wait_s ))
+              [ "$wait_s" -le 60 ] || wait_s=60
+              [ "$wait_s" -ge 1 ] || wait_s=1
+              echo "lazaretto: rate limited (HTTP 429); waiting ${wait_s}s, then retrying this batch (retry ${tries} of 3)."
+              sleep "$wait_s"
+            done
             # A 200 we cannot read is an outage, not a pass.
             if [ "$bcode2" = "200" ] && ! jq -e 'type == "object"' "$bresp" >/dev/null 2>&1; then bcode2="200, unreadable body"; fi
             case "$bcode2" in
@@ -320,6 +342,14 @@ runs:
               401)
                 echo "::warning title=Lazaretto::the api-key was not accepted (HTTP 401), so $(( to_scan - sent )) version(s) were not behaviorally scanned. This is NOT an all-clear."
                 scan_note="${scan_note} The \`api-key\` was not accepted, so **$(( to_scan - sent ))** version(s) were not behaviorally scanned. This is not an all-clear."
+                break
+                ;;
+              429)
+                # Still rate limited after 3 waits: something else is spending
+                # this key's calls. Stop here rather than wait out every chunk
+                # left, and say how many went unscanned.
+                echo "::warning title=Lazaretto::rate limited (HTTP 429) after 3 retries, so $(( to_scan - sent )) version(s) were not behaviorally scanned. This is NOT an all-clear."
+                scan_note="${scan_note} The behavioral scan was rate limited (HTTP 429) after 3 retries, so **$(( to_scan - sent ))** version(s) were not scanned. This is not an all-clear."
                 break
                 ;;
               *)

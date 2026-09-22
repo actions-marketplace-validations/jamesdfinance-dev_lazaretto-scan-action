@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the step's run: block from action.yml the way a GitHub runner does
-# (bash --noprofile --norc -eo pipefail), with curl swapped for test/stub/curl,
-# and checks the ::warning lines, GITHUB_OUTPUT, the step summary and the exit
+# (bash --noprofile --norc -eo pipefail), with curl and sleep swapped for
+# test/stub/curl and test/stub/sleep, and checks the ::warning lines, GITHUB_OUTPUT, the step summary and the exit
 # code for each scenario.
 #
 #   bash test/run-block.sh
@@ -57,6 +57,9 @@ scenario() {
 # fixture <key> <http code> <body>
 fixture() { printf '%s' "$2" > "$S/stub/$1.code"; printf '%s\n' "$3" > "$S/stub/$1.body"; }
 
+# headers <key> <line>...: response headers for that key, as curl -D writes them.
+headers() { local k="$1"; shift; printf '%s\n' "$@" > "$S/stub/$k.headers"; }
+
 # added <n>: a /v1/lockfile/diff answer that adds n versions, pkg-1@1.0.1 ...
 added() {
   fixture diff 200 "$(jq -n --argjson n "$1" \
@@ -110,6 +113,8 @@ output_is()    { grep -Fxq -- "$1=$2" "$S/output" || no "GITHUB_OUTPUT has no $1
 summary_has()  { grep -Fq -- "$1" "$S/summary" || no "summary is missing: $1"; }
 summary_lacks(){ if grep -Fq -- "$1" "$S/summary"; then no "summary should not contain: $1"; fi; }
 batch_calls()  { local n; n="$(cat "$S/stub/batch.count" 2>/dev/null || echo 0)"; [ "$n" -eq "$1" ] || no "${n} batch call(s), wanted $1"; }
+slept()        { local got; got="$(tr '\n' ' ' < "$S/stub/sleep.log" 2>/dev/null | sed 's/ $//')"; [ "$got" = "$1" ] || no "slept '${got}', wanted '$1'"; }
+same_request() { cmp -s "$S/stub/$1.request" "$S/stub/$2.request" || no "$1 and $2 did not send the same packages"; }
 topup_warnings(){ local n; n="$(grep -c "^::warning title=Lazaretto::.*out of credits" "$S/log")"; [ "$n" -eq "$1" ] || no "${n} out-of-credits warning(s), wanted $1"; }
 
 done_() {
@@ -275,6 +280,68 @@ output_is not-scanned-count 2
 output_is credits-remaining 50
 summary_has "Coverage was incomplete: **2** not scanned."
 summary_lacks "out of credits"
+done_
+
+# ============================================================================
+# Rate limits. The server allows 6 batch calls a minute per key, so 250
+# packages (10 chunks) can meet a 429 partway. A 429 is a pause: wait, then
+# send the same chunk again, up to 3 times. test/stub/sleep only logs the wait.
+# ============================================================================
+
+scenario "a 429 then a 200 on the same batch waits Retry-After and scans it"
+added 30   # two batches: 25, 5; the second one is rate limited once
+fixture batch.1 200 "$(batch_ok 25 25 75 null)"
+fixture batch.2 429 '{"error":"rate_limited","retry_after_seconds":30}'
+headers batch.2 'Retry-After: 7' 'X-RateLimit-Remaining: 0'
+fixture batch.3 200 "$(batch_ok 5 5 70 null)"
+run
+exit_is 0
+batch_calls 3
+slept "7"
+same_request batch.2 batch.3
+grep -q 'pkg-26' "$S/stub/batch.3.request" || no "the retry did not resend the second chunk"
+log_line "lazaretto: rate limited (HTTP 429); waiting 7s, then retrying this batch (retry 1 of 3)."
+log_lacks "unavailable"
+log_lacks "::warning"
+output_is not-scanned-count 0
+output_is credits-spent 30
+output_is credits-remaining 70
+output_is worst-verdict clear
+summary_lacks "not an all-clear"
+done_
+
+scenario "a 429 whose Retry-After is not a number waits retry_after_seconds, capped at 60"
+added 3
+fixture batch.1 429 '{"error":"rate_limited","retry_after_seconds":120}'
+headers batch.1 'Retry-After: Wed, 21 Oct 2026 07:28:00 GMT'
+fixture batch.2 200 "$(batch_ok 3 3 7 null)"
+run
+exit_is 0
+batch_calls 2
+slept "60"
+output_is not-scanned-count 0
+output_is worst-verdict clear
+done_
+
+scenario "a 429 with no hint waits 10s, and after 3 retries the rest is reported unscanned"
+added 30   # two batches; the first never gets through, so the second is not sent
+fixture batch.1 429 '{"error":"rate_limited"}'
+fixture batch.2 429 '{"error":"rate_limited"}'
+fixture batch.3 429 '{"error":"rate_limited"}'
+fixture batch.4 429 '{"error":"rate_limited"}'
+fixture batch.5 200 "$(batch_ok 5 5 0 null)"
+run
+exit_is 0
+batch_calls 4
+slept "10 10 10"
+same_request batch.1 batch.4
+log_line "::warning title=Lazaretto::rate limited (HTTP 429) after 3 retries, so 30 version(s) were not behaviorally scanned. This is NOT an all-clear."
+log_lacks "unavailable"
+log_lacks "out of credits"
+output_is not-scanned-count 30
+output_is worst-verdict unscanned
+output_is credits-spent 0
+summary_has "rate limited (HTTP 429) after 3 retries, so **30** version(s) were not scanned. This is not an all-clear."
 done_
 
 # ============================================================================
