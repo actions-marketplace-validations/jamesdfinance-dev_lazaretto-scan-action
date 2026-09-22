@@ -1,5 +1,5 @@
 name: 'Lazaretto Scan'
-description: 'Fail the build when a dependency you pinned is known malware, and behaviorally scan the versions each PR adds. Lockfile check needs no API key.'
+description: 'Block known-malicious dependencies in CI, and behaviorally scan the versions each pull request adds.'
 author: 'Lazaretto'
 branding:
   icon: 'shield'
