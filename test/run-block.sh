@@ -310,6 +310,8 @@ run
 exit_is 0
 header_is "## 🟢 Lazaretto scan"
 summary_lacks "partial"
+summary_has "the dependency identity check is free and needs no API key."
+summary_lacks "unlimited"
 done_
 
 scenario "a version that errored makes the header partial, not green"
@@ -491,6 +493,19 @@ exit_is 0
 log_line "::warning title=Lazaretto::lockfile check unavailable (HTTP 200, unreadable body). This is NOT an all-clear."
 output_is malicious-count 0
 output_is worst-verdict clear
+header_is "## ⚪ Lazaretto scan (partial)"
+summary_lacks "Checked **"
+done_
+
+scenario "a /v1/lockfile 429 warns and is not an all-clear"
+# The lockfile check needs no key, so it is rate limited per IP address.
+fixture lockfile 429 '{"error":"rate_limited","retry_after_seconds":30}'
+added 1
+fixture batch.1 200 "$(batch_ok 1 1 9 null)"
+run
+exit_is 0
+log_line "::warning title=Lazaretto::rate limited on the lockfile check. Not an all-clear."
+output_is malicious-count 0
 header_is "## ⚪ Lazaretto scan (partial)"
 summary_lacks "Checked **"
 done_

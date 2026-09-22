@@ -7,7 +7,7 @@ branding:
 
 inputs:
   lockfile:
-    description: 'Path to a lockfile to check against the known-malicious package feed. "auto" finds package-lock.json, yarn.lock, or pnpm-lock.yaml in the workspace root. Set "" to skip. This check is free, unlimited, and needs no API key.'
+    description: 'Path to a lockfile to check against the known-malicious package feed. "auto" finds package-lock.json, yarn.lock, or pnpm-lock.yaml in the workspace root. Set "" to skip. This check is free and needs no API key. It is rate limited per IP address.'
     required: false
     default: 'auto'
   api-key:
@@ -476,7 +476,7 @@ runs:
           fi
           echo "Automated signals with evidence, not a warranty. \`clear\` means no known-bad match and no rule fired."
           echo
-          echo "<sub>Powered by [Lazaretto](${BASE_URL}) · the dependency identity check is free, unlimited, and needs no API key.</sub>"
+          echo "<sub>Powered by [Lazaretto](${BASE_URL}) · the dependency identity check is free and needs no API key.</sub>"
         } > "$report"
         [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$report" >> "$GITHUB_STEP_SUMMARY"
 

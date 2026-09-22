@@ -2,7 +2,7 @@
 
 Fail the build when a dependency you pinned is known malware, and behaviorally scan the versions each pull request **adds**.
 
-The dependency identity check is **free, unlimited, and needs no API key**. Copy this in and you are done:
+The dependency identity check is **free and needs no API key**. It is rate limited per IP address. Copy this in and you are done:
 
 ```yaml
 name: Lazaretto
@@ -103,6 +103,8 @@ If the API says credits reserved for a batch could not be put back on the key (`
 A known-malware match is a published advisory saying that exact version is malware, so it fails the build at any threshold except `never`. Everything else is an automated signal with evidence attached, not a warranty. A `clear` result means nothing matched and no rule fired; it is not a statement that an artifact carries no risk.
 
 If our API is unreachable the step warns loudly and does not report a clean run. An outage is not an all-clear.
+
+The lockfile check is rate limited per IP address. If a run meets that limit, the step warns and does not report a clean run.
 
 The API takes 6 behavioral scan calls a minute per key, 25 versions each. A run that meets that limit waits as long as the API asks, at most 60 seconds at a time, and sends the same batch again, up to 3 times. If it is still limited after that, the step warns with how many versions were not scanned and does not report a clean run.
 
