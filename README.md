@@ -68,7 +68,9 @@ jobs:
 
 One credit per package that produces a verdict. A package that errors is never billed. `max-packages` is a hard ceiling per run, defaulting to **250**, so a first install cannot produce a surprise bill; the run says plainly when it capped and what it skipped.
 
-`credits-spent` is an output, so you can assert on it.
+If the key runs out of credits partway through, the versions it could pay for are scanned and the step warns with one line saying how many were not, with a link to top up at [lazaretto.dev/buy](https://lazaretto.dev/buy). Running out of credits never fails the build, and the PR comment says how many versions were not scanned.
+
+`credits-spent`, `not-scanned-count` and `credits-remaining` are outputs, so you can assert on them.
 
 ## Inputs
 
@@ -91,6 +93,8 @@ One credit per package that produces a verdict. A package that errors is never b
 | `worst-verdict` | `malicious`, `flagged`, `clear`, `error` or `unscanned`. |
 | `added-count` | Dependency versions this PR adds. |
 | `credits-spent` | Credits billed by this run. |
+| `not-scanned-count` | Versions sent for the behavioral scan that got no verdict (out of credits, out of time, an analysis error, or the scan was unavailable). |
+| `credits-remaining` | Credits left on the key after this run, as reported by the API. Empty when unknown. |
 
 ## What it does not do
 

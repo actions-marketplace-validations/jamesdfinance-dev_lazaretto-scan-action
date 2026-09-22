@@ -52,6 +52,12 @@ outputs:
   credits-spent:
     description: 'Credits billed by this run. Zero when nothing was added or no key was given.'
     value: ${{ steps.laz.outputs.credits-spent }}
+  not-scanned-count:
+    description: 'Dependency versions sent for the behavioral scan that got no verdict: out of credits, out of time, an analysis error, or the scan was unavailable. Anything left out by max-packages is not counted here.'
+    value: ${{ steps.laz.outputs.not-scanned-count }}
+  credits-remaining:
+    description: 'Credits left on the key after this run, as reported by the API. Empty when no behavioral scan response carried it.'
+    value: ${{ steps.laz.outputs.credits-remaining }}
 
 runs:
   using: 'composite'
@@ -145,8 +151,18 @@ runs:
         api="${GITHUB_API_URL:-https://api.github.com}"
         mode="${DEEP_SCAN}"
         threshold="$(rank "$FAIL_ON")"
-        added_count=0; spent=0; worst=0; worst_v="unscanned"; scanned=0
-        paywalled=""; scan_note=""
+        added_count=0; spent=0; worst=0; worst_v="unscanned"; scanned=0; scan_note=""
+        # Coverage accounting. Running out of credits is a billing state, not a
+        # verdict: it only ever warns and never fails the build.
+        to_scan=0       # versions handed to the behavioral scan (after the cap)
+        sent=0          # versions in batches that came back 200
+        short=0         # versions not scanned because the key ran out of credits
+        other_ns=0      # versions not scanned for any other reason (e.g. time)
+        errored_n=0     # versions whose analysis did not complete (never billed)
+        partial_n=0     # versions that could only be partly read
+        incomplete=0    # any batch reported complete_coverage=false
+        left=""         # credits left on the key, from the last 200
+        what=""         # "new version(s)" on a PR, "pinned version(s)" on a whole-tree run
 
         if [ -z "${LAZ_KEY//[[:space:]]/}" ]; then
           # Silence here is the worst answer: somebody who asked for a
@@ -226,7 +242,8 @@ runs:
         fi
 
         if [ -s "$pkglist" ] && [ "$mode" != "none" ]; then
-          echo "lazaretto: behavioral scan of $(wc -l < "$pkglist" | tr -d ' ') package(s); one credit each."
+          to_scan="$(wc -l < "$pkglist" | tr -d ' ')"
+          echo "lazaretto: behavioral scan of ${to_scan} package(s); one credit each."
           # The batch endpoint takes 25 per call.
           split -l 25 "$pkglist" "${pkglist}.chunk." 2>/dev/null || true
           for chunk in "${pkglist}".chunk.*; do
@@ -237,27 +254,66 @@ runs:
             bresp="$(mktemp)"
             bcode2="$(curl -sS -o "$bresp" -w '%{http_code}' --max-time 300 -X POST "${BASE_URL}/v1/scan/batch" \
                        -H 'content-type: application/json' -H "x-api-key: ${LAZ_KEY}" -d "$bpayload" 2>/dev/null || echo 000)"
+            # A 200 we cannot read is an outage, not a pass.
+            if [ "$bcode2" = "200" ] && ! jq -e 'type == "object"' "$bresp" >/dev/null 2>&1; then bcode2="200, unreadable body"; fi
             case "$bcode2" in
               200)
-                spent=$(( spent + $(jq -r '.billed_credits // 0' "$bresp") ))
-                scanned=$(( scanned + $(jq -r '.scanned // 0' "$bresp") ))
-                jq -r '.results[] | "| `\(.name)@\(.version)` | \(if .verdict=="malicious" then "🔴" elif .verdict=="flagged" then "🟠" elif .verdict=="clear" then "🟢" else "⚪" end) \(.verdict) | \(.risk // "none") | \((.findings // []) | length) |"' "$bresp" >> "$rows" 2>/dev/null || true
-                wv="$(jq -r '.worst_verdict.verdict // "clear"' "$bresp")"
+                sent=$(( sent + $(wc -l < "$chunk" | tr -d ' ') ))
+                spent=$(( spent + $(jq -r '.billed_credits // 0' "$bresp" 2>/dev/null || echo 0) ))
+                scanned=$(( scanned + $(jq -r '.scanned // 0' "$bresp" 2>/dev/null || echo 0) ))
+                # Signals column: one per finding. Each result carries the ids of
+                # the rules that fired as rule_ids.
+                jq -r '.results[] | "| `\(.name)@\(.version)` | \(if .verdict=="malicious" then "🔴" elif .verdict=="flagged" then "🟠" elif .verdict=="clear" then "🟢" else "⚪" end) \(.verdict) | \(.risk // "none") | \((.rule_ids // []) | length) |"' "$bresp" >> "$rows" 2>/dev/null || true
+                # No worst_verdict means nothing in this batch got a verdict, which
+                # is not the same as clear.
+                wv="$(jq -r '.worst_verdict.verdict // "unscanned"' "$bresp" 2>/dev/null || echo unscanned)"
                 r="$(rank "$wv")"; if [ "$r" -gt "$worst" ]; then worst="$r"; worst_v="$wv"; fi
                 jq -r '.results[] | select(.verdict=="malicious") | "::error title=Lazaretto::\(.name)@\(.version) is malicious (risk \(.risk))."' "$bresp" 2>/dev/null || true
+
+                # What this batch did NOT cover. A key that runs short mid-batch
+                # still gets a 200 for what it could pay for; the rest comes back
+                # in not_scanned, and silently dropping it made a partial run
+                # read as a full one.
+                ns="$(jq -r '.not_scanned.count // 0' "$bresp" 2>/dev/null || echo 0)"
+                if [ "$ns" -gt 0 ]; then
+                  if jq -e '((.not_scanned.reasons // []) | any(test("credit"; "i"))) or (.remaining_credits == 0)' "$bresp" >/dev/null 2>&1; then
+                    short=$(( short + ns ))
+                  else
+                    other_ns=$(( other_ns + ns ))
+                  fi
+                fi
+                errored_n=$(( errored_n + $(jq -r '(.errored // []) | length' "$bresp" 2>/dev/null || echo 0) ))
+                partial_n=$(( partial_n + $(jq -r '.partly_readable // 0' "$bresp" 2>/dev/null || echo 0) ))
+                if jq -e '.complete_coverage == false' "$bresp" >/dev/null 2>&1; then incomplete=1; fi
+                rc="$(jq -r '.remaining_credits // empty' "$bresp" 2>/dev/null || true)"
+                if [ -n "$rc" ]; then left="$rc"; fi
                 ;;
-              401|402)
-                paywalled="$(jq -r '.detail // .error // "payment required"' "$bresp" 2>/dev/null)"
-                echo "::warning title=Lazaretto::behavioral scan needs credits: ${paywalled}"
+              402)
+                # Out of credits before this batch started: it and every batch
+                # after it go unscanned. Warn, never fail.
+                short=$(( short + to_scan - sent ))
+                break
+                ;;
+              401)
+                echo "::warning title=Lazaretto::the api-key was not accepted (HTTP 401), so $(( to_scan - sent )) version(s) were not behaviorally scanned. This is NOT an all-clear."
+                scan_note="${scan_note} The \`api-key\` was not accepted, so **$(( to_scan - sent ))** version(s) were not behaviorally scanned. This is not an all-clear."
                 break
                 ;;
               *)
                 echo "::warning title=Lazaretto::behavioral scan unavailable (HTTP ${bcode2}). This is NOT an all-clear."
+                scan_note="${scan_note} The behavioral scan was unavailable (HTTP ${bcode2}), so **$(( to_scan - sent ))** version(s) were not scanned. This is not an all-clear."
                 break
                 ;;
             esac
           done
           [ "$scanned" -gt 0 ] && [ "$worst_v" = "unscanned" ] && worst_v="clear"
+
+          if [ "$mode" = "changed" ]; then what="new version"; else what="pinned version"; fi
+          [ "$short" -eq 1 ] || what="${what}s"
+          if [ "$short" -gt 0 ]; then
+            echo "::warning title=Lazaretto::${short} ${what} not scanned: out of credits. Top up: ${BASE_URL}/buy"
+          fi
+          if [ -n "$left" ]; then echo "lazaretto: ${left} credit(s) left on this key."; fi
         elif [ "$mode" != "none" ] && [ -z "$scan_note" ]; then
           echo "lazaretto: this pull request adds no dependency versions; nothing to scan, nothing billed."
         fi
@@ -287,7 +343,7 @@ runs:
             echo "### Behavioral scan"
             echo
             if [ "$mode" = "changed" ]; then
-              echo "Scanned the **${added_count}** dependency version(s) this pull request adds."
+              echo "This pull request adds **${added_count}** dependency version(s)."
             else
               echo "Whole-tree scan."
             fi
@@ -304,11 +360,24 @@ runs:
             echo "This pull request adds no dependency versions, so nothing was scanned and nothing was billed."
             echo
           fi
-          [ -n "$scan_note" ] && { echo "> ${scan_note}"; echo; }
-          if [ -n "$paywalled" ]; then
-            echo "> **Behavioral scan stopped: out of credits.** ${paywalled}"
+          [ -n "$scan_note" ] && { echo "> ${scan_note# }"; echo; }
+          # Anything the API said it did not fully cover, other than credits
+          # (which get their own block below).
+          gaps=""
+          [ "$other_ns" -gt 0 ] && gaps="${gaps}, **${other_ns}** not scanned"
+          [ "$errored_n" -gt 0 ] && gaps="${gaps}, **${errored_n}** could not be analyzed (not billed)"
+          [ "$partial_n" -gt 0 ] && gaps="${gaps}, **${partial_n}** could only be partly read"
+          if [ -n "$gaps" ]; then
+            echo "> Coverage was incomplete: ${gaps#, }. This is not an all-clear for those versions."
+            echo
+          elif [ "$incomplete" = "1" ] && [ "$short" -eq 0 ]; then
+            echo "> Coverage was incomplete for this run. This is not an all-clear."
+            echo
+          fi
+          if [ "$short" -gt 0 ]; then
+            echo "> **Behavioral scan stopped: out of credits.** **${short}** ${what} not scanned. This is not an all-clear for those."
             echo ">"
-            echo "> The free dependency identity check above still ran. Top up at ${BASE_URL}/#pricing."
+            echo "> The free dependency identity check above still ran. Top up: ${BASE_URL}/buy"
             echo
           fi
           echo "Automated signals with evidence, not a warranty. \`clear\` means no known-bad match and no rule fired."
@@ -321,6 +390,8 @@ runs:
         echo "worst-verdict=${worst_v}" >> "${GITHUB_OUTPUT:-/dev/null}"
         echo "added-count=${added_count}" >> "${GITHUB_OUTPUT:-/dev/null}"
         echo "credits-spent=${spent}" >> "${GITHUB_OUTPUT:-/dev/null}"
+        echo "not-scanned-count=$(( to_scan - scanned ))" >> "${GITHUB_OUTPUT:-/dev/null}"
+        echo "credits-remaining=${left}" >> "${GITHUB_OUTPUT:-/dev/null}"
 
         # Sticky PR comment (create or update the single Lazaretto comment).
         if [ "${COMMENT}" = "true" ] && [ -n "${GH_TOKEN//[[:space:]]/}" ] && [ -f "${GITHUB_EVENT_PATH:-/nonexistent}" ]; then
