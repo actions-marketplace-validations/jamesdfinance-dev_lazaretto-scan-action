@@ -82,7 +82,7 @@ If the API says credits reserved for a batch could not be put back on the key (`
 | `api-key` | `''` | Turns on the behavioral scan. Without it only the free identity check runs. |
 | `deep-scan` | `auto` | `auto` scans what a PR adds, and the whole tree on a schedule or manual run. Force with `changed`, `all` or `none`. |
 | `max-packages` | `250` | Hard ceiling on packages scanned per run. One credit each. |
-| `fail-on` | `malicious` | Fail at `malicious`, `flagged`, or `never`. |
+| `fail-on` | `malicious` | Fail at `malicious`, `flagged`, or `never`. `flagged` includes low-risk signals (for example a bundler that calls `Function()`), so `fail-on: flagged` can fail builds on low-risk flags. The default, `malicious`, does not. |
 | `comment` | `true` | Post and update a sticky PR comment. Needs `pull-requests: write`. |
 | `github-token` | workflow token | Used to post the comment and read the base lockfile. |
 | `base-url` | `https://lazaretto.dev` | API base URL. |

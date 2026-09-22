@@ -23,7 +23,7 @@ inputs:
     required: false
     default: '250'
   fail-on:
-    description: 'Fail the build when the worst verdict reaches this level: malicious | flagged | never.'
+    description: 'Fail the build when the worst verdict reaches this level: malicious | flagged | never. "flagged" includes low-risk signals (for example a bundler that calls Function()), so fail-on: flagged can fail builds on low-risk flags. The default, malicious, does not.'
     required: false
     default: 'malicious'
   comment:
