@@ -90,7 +90,7 @@ If the key runs out of credits partway through, the versions it could pay for ar
 | output | meaning |
 | --- | --- |
 | `malicious-count` | Pinned versions found to be known malware. |
-| `worst-verdict` | `malicious`, `flagged`, `clear`, `error` or `unscanned`. |
+| `worst-verdict` | Worst verdict across every scanned version: `malicious`, `flagged`, `clear`, or `unscanned` when nothing got a verdict. `fail-on` is checked against this. |
 | `added-count` | Dependency versions this PR adds. |
 | `credits-spent` | Credits billed by this run. |
 | `not-scanned-count` | Versions sent for the behavioral scan that got no verdict (out of credits, out of time, an analysis error, or the scan was unavailable). |

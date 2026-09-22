@@ -292,6 +292,45 @@ log_line "::error title=Lazaretto::pkg-1@1.0.1 is malicious (risk high)."
 output_is worst-verdict malicious
 done_
 
+scenario "a malicious result behind a flagged worst_verdict still fails fail-on: malicious"
+# The server orders worst_verdict by risk alone, so a flagged/critical package
+# ahead of a malicious/critical one makes it say flagged. The gate reads the
+# results.
+FAIL_ON=malicious
+added 2
+fixture batch.1 200 '{"requested":2,"scanned":2,"billed_credits":2,"refunded_credits":0,"refund_failed":false,"remaining_credits":8,"complete_coverage":true,"not_scanned":null,"partly_readable":0,
+  "worst_verdict":{"name":"pkg-1","version":"1.0.1","verdict":"flagged","risk":"critical"},
+  "results":[{"name":"pkg-1","version":"1.0.1","verdict":"flagged","risk":"critical","rule_ids":["r1"]},
+             {"name":"pkg-2","version":"1.0.2","verdict":"malicious","risk":"critical","rule_ids":["r2"]}],
+  "errored":[]}'
+run
+exit_is 1
+log_line "::error title=Lazaretto::pkg-2@1.0.2 is malicious (risk critical)."
+log_line "::error title=Lazaretto::Worst verdict 'malicious' meets the fail-on threshold 'malicious'. Failing the build."
+output_is worst-verdict malicious
+summary_has "Worst verdict: **malicious**."
+done_
+
+scenario "the gate reads the results of every batch, not only the first"
+FAIL_ON=malicious
+added 30   # two batches: 25, 5
+fixture batch.1 200 "$(batch_ok 25 25 5 null flagged)"
+fixture batch.2 200 "$(batch_ok 5 5 0 null clear | jq -c '.results[4].verdict = "malicious" | .results[4].risk = "critical" | .worst_verdict.verdict = "clear"')"
+run
+exit_is 1
+batch_calls 2
+output_is worst-verdict malicious
+done_
+
+scenario "results that are all clear read clear, whatever worst_verdict says"
+FAIL_ON=flagged
+added 2
+fixture batch.1 200 "$(batch_ok 2 2 8 null clear | jq -c '.worst_verdict = null')"
+run
+exit_is 0
+output_is worst-verdict clear
+done_
+
 scenario "fail-on: never passes even on a malicious verdict"
 FAIL_ON=never
 added 2

@@ -44,7 +44,7 @@ outputs:
     description: 'Number of pinned dependency versions found to be known malware.'
     value: ${{ steps.laz.outputs.malicious-count }}
   worst-verdict:
-    description: 'Worst verdict from the behavioral scan (malicious | flagged | clear | error | unscanned).'
+    description: 'Worst verdict across every result of the behavioral scan: malicious if any result is malicious, else flagged if any is flagged, else clear if anything got a verdict, else unscanned. This is what fail-on is checked against.'
     value: ${{ steps.laz.outputs.worst-verdict }}
   added-count:
     description: 'Dependency versions this pull request adds, as computed against the base lockfile.'
@@ -268,9 +268,14 @@ runs:
                 # Signals column: one per finding. Each result carries the ids of
                 # the rules that fired as rule_ids.
                 jq -r '.results[] | "| `\(.name)@\(.version)` | \(if .verdict=="malicious" then "🔴" elif .verdict=="flagged" then "🟠" elif .verdict=="clear" then "🟢" else "⚪" end) \(.verdict) | \(.risk // "none") | \((.rule_ids // []) | length) |"' "$bresp" >> "$rows" 2>/dev/null || true
-                # No worst_verdict means nothing in this batch got a verdict, which
-                # is not the same as clear.
-                wv="$(jq -r '.worst_verdict.verdict // "unscanned"' "$bresp" 2>/dev/null || echo unscanned)"
+                # The gate reads every result, not worst_verdict: the server orders
+                # that by risk alone, so a flagged/critical package ahead of a
+                # malicious/critical one made it say flagged. Malicious if any
+                # result is, else flagged if any is, else clear if there are any
+                # results. No results means nothing got a verdict, which is not
+                # the same as clear. Taking the highest rank over the batches
+                # gives the same answer across all of them.
+                wv="$(jq -r '[(.results // [])[] | .verdict] | if any(. == "malicious") then "malicious" elif any(. == "flagged") then "flagged" elif length > 0 then "clear" else "unscanned" end' "$bresp" 2>/dev/null || echo unscanned)"
                 r="$(rank "$wv")"; if [ "$r" -gt "$worst" ]; then worst="$r"; worst_v="$wv"; fi
                 jq -r '.results[] | select(.verdict=="malicious") | "::error title=Lazaretto::\(.name)@\(.version) is malicious (risk \(.risk))."' "$bresp" 2>/dev/null || true
 
@@ -324,7 +329,6 @@ runs:
                 ;;
             esac
           done
-          [ "$scanned" -gt 0 ] && [ "$worst_v" = "unscanned" ] && worst_v="clear"
 
           if [ "$mode" = "changed" ]; then what="new version"; else what="pinned version"; fi
           [ "$short" -eq 1 ] || what="${what}s"
