@@ -471,6 +471,52 @@ done_
 # ways the step must not go red.
 # ============================================================================
 
+scenario "a /v1/lockfile 200 that is not JSON warns and is not an all-clear"
+fixture lockfile 200 '<html><body>502 Bad Gateway</body></html>'
+added 1
+fixture batch.1 200 "$(batch_ok 1 1 9 null)"
+run
+exit_is 0
+log_line "::warning title=Lazaretto::lockfile check unavailable (HTTP 200, unreadable body). This is NOT an all-clear."
+output_is malicious-count 0
+output_is worst-verdict clear
+header_is "## ⚪ Lazaretto scan (partial)"
+summary_lacks "Checked **"
+done_
+
+scenario "a /v1/lockfile 200 that is JSON of the wrong shape is read the same way"
+fixture lockfile 200 '{"checked":3}'
+DEEP_SCAN=none
+run
+exit_is 0
+log_line "::warning title=Lazaretto::lockfile check unavailable (HTTP 200, unreadable body). This is NOT an all-clear."
+output_is malicious-count 0
+header_is "## ⚫ Lazaretto: nothing checked"
+done_
+
+scenario "a /v1/lockfile/diff 200 that is not JSON skips the scan with a warning"
+fixture diff 200 '<html><body>502 Bad Gateway</body></html>'
+run
+exit_is 0
+batch_calls 0
+log_line "::warning title=Lazaretto::could not diff the lockfiles (HTTP 200, unreadable body); skipping the behavioral scan."
+output_is added-count 0
+output_is worst-verdict unscanned
+summary_has "The lockfiles could not be compared, so nothing was scanned. This is not an all-clear."
+summary_lacks "adds no dependency versions"
+header_is "## ⚪ Lazaretto scan (partial)"
+done_
+
+scenario "a whole-tree /v1/lockfile/diff 200 that is not JSON is not an all-clear"
+EVENT_NAME=schedule
+fixture diff 200 'upstream connect error'
+run
+exit_is 0
+batch_calls 0
+log_line "::warning title=Lazaretto::could not enumerate the tree (HTTP 200, unreadable body). This is NOT an all-clear."
+summary_has "The dependency tree could not be enumerated, so nothing was scanned. This is not an all-clear."
+done_
+
 scenario "a malicious verdict still fails the build"
 FAIL_ON=malicious
 added 2

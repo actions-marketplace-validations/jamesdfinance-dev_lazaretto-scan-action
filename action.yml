@@ -108,15 +108,21 @@ runs:
           code="$(curl -sS -o "$lock_resp" -w '%{http_code}' --max-time 120 \
                     -X POST "${BASE_URL}/v1/lockfile" \
                     -H "content-type: ${ctype}" --data-binary @"$lockfile" 2>/dev/null || echo 000)"
+          # A 200 we cannot read is an outage, not a pass. Reading it anyway
+          # made jq fail and ended the step red.
+          if [ "$code" = "200" ] && ! jq -e 'type == "object" and (.malicious | type) == "array" and all(.malicious[]; type == "object")
+                                             and ((.unverified // []) | type) == "array" and all((.unverified // [])[]; type == "object")' "$lock_resp" >/dev/null 2>&1; then
+            code="200, unreadable body"
+          fi
           case "$code" in
             200)
               lock_ran=1
               mal_count="$(jq -r '.malicious | length' "$lock_resp")"
-              checked="$(jq -r '.checked' "$lock_resp")"
-              unver="$(jq -r '.unverified | length' "$lock_resp")"
-              skipped="$(jq -r '.skipped.count // 0' "$lock_resp")"
+              checked="$(jq -r '.checked // 0' "$lock_resp")"
+              unver="$(jq -r '(.unverified // []) | length' "$lock_resp")"
+              skipped="$(jq -r '.skipped.count? // 0' "$lock_resp")"
               jq -r '.malicious[] | "| `\(.name)@\(.version)` | 🔴 known malware | [\(.ids[0])](\(.advisory_url)) |"' "$lock_resp" >> "$lockrows"
-              jq -r '.unverified[] | "| `\(.name)@\(.version)` | ⚪ not verified | \(.reason) |"' "$lock_resp" >> "$lockrows"
+              jq -r '(.unverified // [])[] | "| `\(.name)@\(.version)` | ⚪ not verified | \(.reason) |"' "$lock_resp" >> "$lockrows"
               lock_note="Checked **${checked}** pinned versions from \`${lockfile}\`."
               [ "$unver" -gt 0 ] && lock_note="${lock_note} **${unver}** could not be checked, which is not an all-clear for those."
               [ "$skipped" -gt 0 ] && lock_note="${lock_note} ${skipped} local/non-registry entr$([ "$skipped" -eq 1 ] && echo "y has" || echo "ies have") no published identity to check."
@@ -186,6 +192,9 @@ runs:
         fi
 
         pkglist="$(mktemp)"   # newline-delimited name@version
+        # What a /v1/lockfile/diff 200 must look like before it is read. Anything
+        # else is treated like an outage: warned about, never an all-clear.
+        diff_ok='type == "object" and (.added | type) == "array" and all(.added[]; type == "object")'
         if [ "$mode" = "changed" ] && [ -n "$lockfile" ]; then
           base_sha="$(jq -r '.pull_request.base.sha // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null)"
           if [ -z "$base_sha" ]; then
@@ -206,10 +215,11 @@ runs:
               dresp="$(mktemp)"
               dcode="$(curl -sS -o "$dresp" -w '%{http_code}' --max-time 120 -X POST "${BASE_URL}/v1/lockfile/diff" \
                         -H 'content-type: application/json' -d "$dpayload" 2>/dev/null || echo 000)"
+              if [ "$dcode" = "200" ] && ! jq -e "$diff_ok" "$dresp" >/dev/null 2>&1; then dcode="200, unreadable body"; fi
               if [ "$dcode" = "200" ]; then
                 added_count="$(jq -r '.added | length' "$dresp")"
                 jq -r '.added[] | "\(.name)@\(.version)"' "$dresp" > "$pkglist"
-                up="$(jq -r '.upgraded | length' "$dresp")"
+                up="$(jq -r '(.upgraded // []) | length' "$dresp")"
                 echo "lazaretto: this PR adds ${added_count} dependency version(s) (${up} upgrade(s))."
               else
                 echo "::warning title=Lazaretto::could not diff the lockfiles (HTTP ${dcode}); skipping the behavioral scan."
@@ -227,6 +237,7 @@ runs:
           dpayload="$(jq -n --rawfile h "$lockfile" '{base:"{\"lockfileVersion\":3,\"packages\":{}}",head:$h}')"
           dcode="$(curl -sS -o "$dresp" -w '%{http_code}' --max-time 120 -X POST "${BASE_URL}/v1/lockfile/diff" \
                     -H 'content-type: application/json' -d "$dpayload" 2>/dev/null || echo 000)"
+          if [ "$dcode" = "200" ] && ! jq -e "$diff_ok" "$dresp" >/dev/null 2>&1; then dcode="200, unreadable body"; fi
           if [ "$dcode" = "200" ]; then
             jq -r '.added[] | "\(.name)@\(.version)"' "$dresp" > "$pkglist"
             added_count="$(wc -l < "$pkglist" | tr -d ' ')"
