@@ -70,6 +70,8 @@ One credit per package that produces a verdict. A package that errors is never b
 
 If the key runs out of credits partway through, the versions it could pay for are scanned and the step warns with one line saying how many were not, with a link to top up at [lazaretto.dev/buy](https://lazaretto.dev/buy). Running out of credits never fails the build, and the PR comment says how many versions were not scanned. A version skipped for another reason, such as the scan running out of time, is not billed and is not counted as out of credits; the comment lists it under incomplete coverage.
 
+If the API says credits reserved for a batch could not be put back on the key (`refund_failed`), the step warns with the API's note on how to get them back, and the PR comment repeats it.
+
 `credits-spent`, `not-scanned-count` and `credits-remaining` are outputs, so you can assert on them.
 
 ## Inputs

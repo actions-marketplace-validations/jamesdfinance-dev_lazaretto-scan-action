@@ -421,6 +421,52 @@ summary_has "rate limited (HTTP 429) after 3 retries, so **30** version(s) were 
 done_
 
 # ============================================================================
+# Refunds. refund_failed means credits were reserved and could not be put
+# back: say so in the log and the comment, in the server's words.
+# ============================================================================
+
+scenario "a 200 with refund_failed warns with refund_note and puts it in the comment"
+added 5
+NOTE="2 reserved credits could not be returned to this key automatically. Email support@lazaretto.test with the time of this request and they will be returned by hand."
+fixture batch.1 200 "$(batch_ok 3 3 5 "$(not_scanned 0 2 0 4)" | jq -c --arg n "$NOTE" '.refund_failed = true | .refund_note = $n')"
+run
+exit_is 0
+log_line "::warning title=Lazaretto::refund failed: ${NOTE}"
+summary_has "> **Refund failed.** ${NOTE}"
+grep -Fq "Refund failed." "$S/stub/comment_create.request" 2>/dev/null || no "the PR comment does not mention the failed refund"
+output_is credits-spent 3
+done_
+
+scenario "a refund note with a line break cannot start a workflow command of its own"
+added 1
+fixture batch.1 200 "$(batch_ok 1 1 9 null | jq -c '.refund_failed = true | .refund_note = "1 credit is owed.\n::error title=x::5% boom"')"
+run
+exit_is 0
+log_line "::warning title=Lazaretto::refund failed: 1 credit is owed. ::error title=x::5%25 boom"
+if grep -q '^::error title=x' "$S/log"; then no "the note started its own ::error line"; fi
+done_
+
+scenario "a 200 with refund_failed false says nothing about refunds"
+added 2
+fixture batch.1 200 "$(batch_ok 2 2 8 null | jq -c '.refund_failed = false | .refunded_credits = 0')"
+run
+exit_is 0
+log_lacks "refund failed"
+summary_lacks "Refund failed"
+done_
+
+scenario "a failed batch with refund_failed warns with its detail as well as the outage"
+added 3
+fixture batch.1 500 '{"error":"batch_failed","detail":"The batch could not be completed and nothing was billed, but 3 reserved credits could not be returned to this key automatically.","refunded_credits":0,"refund_failed":true}'
+run
+exit_is 0
+log_line "::warning title=Lazaretto::refund failed: The batch could not be completed and nothing was billed, but 3 reserved credits could not be returned to this key automatically."
+log_line "::warning title=Lazaretto::behavioral scan unavailable (HTTP 500). This is NOT an all-clear."
+summary_has "> **Refund failed.** The batch could not be completed"
+output_is not-scanned-count 3
+done_
+
+# ============================================================================
 # Not billing. Proves the harness can see a failing step, and pins the other
 # ways the step must not go red.
 # ============================================================================
