@@ -115,6 +115,7 @@ summary_lacks(){ if grep -Fq -- "$1" "$S/summary"; then no "summary should not c
 batch_calls()  { local n; n="$(cat "$S/stub/batch.count" 2>/dev/null || echo 0)"; [ "$n" -eq "$1" ] || no "${n} batch call(s), wanted $1"; }
 slept()        { local got; got="$(tr '\n' ' ' < "$S/stub/sleep.log" 2>/dev/null | sed 's/ $//')"; [ "$got" = "$1" ] || no "slept '${got}', wanted '$1'"; }
 same_request() { cmp -s "$S/stub/$1.request" "$S/stub/$2.request" || no "$1 and $2 did not send the same packages"; }
+header_is()    { local h; h="$(grep -m1 '^## ' "$S/summary")"; [ "$h" = "$1" ] || no "header is '${h}', wanted '$1'"; }
 topup_warnings(){ local n; n="$(grep -c "^::warning title=Lazaretto::.*out of credits" "$S/log")"; [ "$n" -eq "$1" ] || no "${n} out-of-credits warning(s), wanted $1"; }
 
 done_() {
@@ -152,6 +153,7 @@ output_is worst-verdict clear
 summary_has "**Behavioral scan stopped: out of credits.** **40** new versions not scanned."
 summary_has "$TOPUP"
 summary_lacks "Coverage was incomplete"
+header_is "## ⚪ Lazaretto scan (partial)"
 grep -q 'out of credits' "$S/stub/comment_create.request" 2>/dev/null || no "the PR comment does not say it ran out of credits"
 done_
 
@@ -205,6 +207,7 @@ output_is not-scanned-count 3
 output_is worst-verdict unscanned
 output_is credits-spent 0
 summary_has "unavailable (HTTP 200, unreadable body), so **3** version(s) were not scanned."
+header_is "## ⚪ Lazaretto scan (partial)"
 done_
 
 scenario "a batch that only ran out of time gets no top-up warning"
@@ -220,6 +223,7 @@ output_is credits-spent 3
 output_is worst-verdict clear
 summary_has "Coverage was incomplete: **2** not scanned because the scan ran out of time (not billed)."
 summary_lacks "out of credits"
+header_is "## ⚪ Lazaretto scan (partial)"
 done_
 
 scenario "a time-only skip on a key that happens to be at 0 is still not a credit problem"
@@ -280,6 +284,78 @@ output_is not-scanned-count 2
 output_is credits-remaining 50
 summary_has "Coverage was incomplete: **2** not scanned."
 summary_lacks "out of credits"
+done_
+
+# ============================================================================
+# The comment header. Green only when everything this run set out to check
+# was covered. Anything not scanned, errored, partly read or incomplete makes
+# it partial: a finding keeps its colour, anything else goes neutral.
+# ============================================================================
+
+scenario "a run that covered everything and found nothing gets a green header"
+added 2
+fixture batch.1 200 "$(batch_ok 2 2 8 null)"
+run
+exit_is 0
+header_is "## 🟢 Lazaretto scan"
+summary_lacks "partial"
+done_
+
+scenario "a version that errored makes the header partial, not green"
+added 3
+fixture batch.1 200 "$(batch_ok 2 2 8 null | jq -c '.complete_coverage = false | .errored = [{name: "pkg-3", version: "1.0.3", error: "analysis failed"}]')"
+run
+exit_is 0
+header_is "## ⚪ Lazaretto scan (partial)"
+output_is worst-verdict clear
+summary_has "**1** could not be analyzed (not billed)"
+done_
+
+scenario "a version that was only partly read makes the header partial"
+added 2
+fixture batch.1 200 "$(batch_ok 2 2 8 null | jq -c '.complete_coverage = false | .partly_readable = 1')"
+run
+exit_is 0
+header_is "## ⚪ Lazaretto scan (partial)"
+summary_has "**1** could only be partly read"
+done_
+
+scenario "complete_coverage false on its own makes the header partial"
+added 2
+fixture batch.1 200 "$(batch_ok 2 2 8 null | jq -c '.complete_coverage = false')"
+run
+exit_is 0
+header_is "## ⚪ Lazaretto scan (partial)"
+summary_has "Coverage was incomplete for this run."
+done_
+
+scenario "versions left out by max-packages make the header partial"
+MAX_PKGS=2
+added 3
+fixture batch.1 200 "$(batch_ok 2 2 8 null)"
+run
+exit_is 0
+header_is "## ⚪ Lazaretto scan (partial)"
+summary_has "Capped at **2** of 3 packages"
+done_
+
+scenario "lockfile versions that could not be verified make the header partial"
+fixture lockfile 200 '{"checked":3,"malicious":[],"unverified":[{"name":"pkg-9","version":"9.9.9","reason":"registry unreachable"}],"skipped":{"count":0}}'
+added 1
+fixture batch.1 200 "$(batch_ok 1 1 9 null)"
+run
+exit_is 0
+header_is "## ⚪ Lazaretto scan (partial)"
+done_
+
+scenario "a flagged verdict on a partial run keeps its colour and says partial"
+added 5
+fixture batch.1 200 "$(batch_ok 3 3 97 "$(not_scanned 0 2 0 4)" flagged)"
+FAIL_ON=malicious
+run
+exit_is 0
+header_is "## 🟠 Lazaretto scan (partial)"
+output_is worst-verdict flagged
 done_
 
 # ============================================================================

@@ -82,7 +82,7 @@ runs:
         ns_reason() { jq -r --arg k "$2" '(.not_scanned.by_reason[$k] // 0) | if type == "number" and . > 0 then floor else 0 end' "$1" 2>/dev/null || echo 0; }
 
         report="$(mktemp)"; rows="$(mktemp)"; lockrows="$(mktemp)"
-        mal_count=0; lock_ran=0; lock_note=""
+        mal_count=0; lock_ran=0; lock_note=""; unver=0
 
         # ------------------------------------------------------------------
         # 1) Lockfile check. Free, no API key, one request for the whole tree.
@@ -373,9 +373,24 @@ runs:
         # ------------------------------------------------------------------
         # 3) Report.
         # ------------------------------------------------------------------
+        # A partial run never gets a green header. Partial means something
+        # this run set out to check was not fully covered: the lockfile check
+        # did not come back or left versions unverified, a version sent for
+        # the behavioral scan got no verdict, one errored or was only partly
+        # read, the API said coverage was incomplete, or a scan_note was
+        # written (every scan_note says something was not scanned).
+        partial=0
+        if [ -n "$lockfile" ] && [ "$lock_ran" != "1" ]; then partial=1; fi
+        if [ "$unver" -gt 0 ] 2>/dev/null; then partial=1; fi
+        if [ $(( to_scan - scanned )) -gt 0 ] || [ "$errored_n" -gt 0 ] || [ "$partial_n" -gt 0 ] || [ "$incomplete" = "1" ]; then partial=1; fi
+        if [ -n "$scan_note" ]; then partial=1; fi
         {
           if [ "$mal_count" -gt 0 ]; then
             echo "## 🔴 Lazaretto: ${mal_count} known-malicious dependenc$([ "$mal_count" -eq 1 ] && echo y || echo ies)"
+          elif [ "$partial" = "1" ] && { [ "$lock_ran" = "1" ] || [ "$scanned" -gt 0 ]; }; then
+            # A finding keeps its colour; anything else goes neutral.
+            case "$worst_v" in malicious|flagged) hicon="$(icon "$worst_v")";; *) hicon='⚪';; esac
+            echo "## ${hicon} Lazaretto scan (partial)"
           elif [ "$lock_ran" = "1" ] || [ "$scanned" -gt 0 ]; then
             echo "## $(icon "$worst_v") Lazaretto scan"
           else
