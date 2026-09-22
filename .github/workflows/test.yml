@@ -1,0 +1,19 @@
+name: Test
+
+# Runs the step's script from action.yml the way a runner does
+# (bash --noprofile --norc -eo pipefail), with curl swapped for a stub that
+# answers from fixtures. No network and no API key.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  run-block:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run the step against a stubbed API
+        run: bash test/run-block.sh
