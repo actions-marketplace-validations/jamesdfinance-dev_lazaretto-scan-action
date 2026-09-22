@@ -210,6 +210,17 @@ summary_has "unavailable (HTTP 200, unreadable body), so **3** version(s) were n
 header_is "## ⚪ Lazaretto scan (partial)"
 done_
 
+scenario "a 200 whose results are not a list of objects is an outage, not a pass"
+added 2
+fixture batch.1 200 "$(batch_ok 2 2 8 null | jq -c '.results = "see worst_verdict"')"
+run
+exit_is 0
+log_line "::warning title=Lazaretto::behavioral scan unavailable (HTTP 200, unreadable body). This is NOT an all-clear."
+output_is worst-verdict unscanned
+output_is not-scanned-count 2
+header_is "## ⚪ Lazaretto scan (partial)"
+done_
+
 scenario "a batch that only ran out of time gets no top-up warning"
 added 5
 fixture batch.1 200 "$(batch_ok 3 3 97 "$(not_scanned 0 2 0 4)")"

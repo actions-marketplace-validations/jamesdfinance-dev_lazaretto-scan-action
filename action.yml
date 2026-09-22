@@ -291,8 +291,10 @@ runs:
               echo "lazaretto: rate limited (HTTP 429); waiting ${wait_s}s, then retrying this batch (retry ${tries} of 3)."
               sleep "$wait_s"
             done
-            # A 200 we cannot read is an outage, not a pass.
-            if [ "$bcode2" = "200" ] && ! jq -e 'type == "object"' "$bresp" >/dev/null 2>&1; then bcode2="200, unreadable body"; fi
+            # A 200 we cannot read is an outage, not a pass. The gate is read
+            # from .results, so a results field that is not a list of objects
+            # counts as unreadable too.
+            if [ "$bcode2" = "200" ] && ! jq -e 'type == "object" and ((.results // []) | type) == "array" and all((.results // [])[]; type == "object")' "$bresp" >/dev/null 2>&1; then bcode2="200, unreadable body"; fi
             # refund_failed means credits were reserved for work that did not
             # happen and could not be put back on the key. That is money owed,
             # so it goes in the log and the comment in the server's own words
