@@ -1,7 +1,8 @@
 name: Self test
 
 # Manual only: proves the composite action wires inputs -> scan -> verdict in a
-# real runner. Claims its own trial key at runtime (the runner has a fresh IP).
+# real runner. Claims its own trial key at runtime (the runner has a fresh IP)
+# and scans a one-package lockfile it writes itself, since this repo has none.
 # fail-on: malicious, so a clear/error verdict passes; it will not go red when
 # the trial credits run out.
 on:
@@ -21,9 +22,20 @@ jobs:
             echo "::add-mask::$key"
           fi
           echo "LAZ_KEY=$key" >> "$GITHUB_ENV"
+      - name: Write a one-package lockfile
+        run: |
+          cat > package-lock.json <<'JSON'
+          {
+            "name": "selftest",
+            "lockfileVersion": 3,
+            "packages": {
+              "": { "name": "selftest", "dependencies": { "left-pad": "1.3.0" } },
+              "node_modules/left-pad": { "version": "1.3.0" }
+            }
+          }
+          JSON
       - uses: ./
         with:
           api-key: ${{ env.LAZ_KEY }}
-          targets: |
-            npm_package:left-pad@1.3.0
+          deep-scan: all
           fail-on: malicious

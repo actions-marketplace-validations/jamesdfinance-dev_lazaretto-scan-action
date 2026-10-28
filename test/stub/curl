@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Stand-in for curl, used by test/run-block.sh. It never touches the network:
+# each request is answered from <key>.code and <key>.body in $STUB_DIR, and
+# every call is logged to $STUB_DIR/calls.log.
+#
+# Keys: lockfile, diff, base (the base lockfile read), comments (list),
+# comment_create, comment_update, and batch.1, batch.2, ... for the Nth call
+# to /v1/scan/batch. A key with no .code file answers 404. An optional
+# <key>.headers file holds response header lines, written out for -D.
+set -u
+
+out=""; fmt=""; method=""; url=""; fail=0; data=""; hdr=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2;;
+    -D|--dump-header) hdr="$2"; shift 2;;
+    -w) fmt="$2"; shift 2;;
+    -X) method="$2"; shift 2;;
+    -H|--max-time) shift 2;;
+    -d|--data-binary) data="$2"; shift 2;;
+    --*) shift;;
+    -*) case "$1" in *f*) fail=1;; esac; shift;;
+    *) url="$1"; shift;;
+  esac
+done
+if [ -z "$method" ]; then
+  if [ -n "$data" ]; then method=POST; else method=GET; fi
+fi
+
+d="${STUB_DIR:?STUB_DIR is not set}"
+case "$url" in
+  */v1/lockfile/diff) key=diff;;
+  */v1/lockfile)      key=lockfile;;
+  */v1/scan/batch)
+    n=$(( $(cat "$d/batch.count" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$d/batch.count"
+    key="batch.$n";;
+  */contents/*)       key=base;;
+  */issues/comments/*) key=comment_update;;
+  */issues/*/comments*)
+    if [ "$method" = "POST" ]; then key=comment_create; else key=comments; fi;;
+  *)                  key=unknown;;
+esac
+echo "$method $url -> $key" >> "$d/calls.log"
+[ -n "$data" ] && printf '%s\n' "$data" > "$d/$key.request"
+
+code=404
+[ -f "$d/$key.code" ] && code="$(cat "$d/$key.code")"
+if [ "$code" = "000" ]; then
+  # Connection failure: curl prints 000 for %{http_code} and exits 7.
+  [ -n "$fmt" ] && printf '000'
+  exit 7
+fi
+if [ "$fail" = "1" ] && [ "$code" -ge 400 ]; then
+  echo "curl: (22) The requested URL returned error: ${code}" >&2
+  exit 22
+fi
+
+if [ -n "$hdr" ]; then
+  {
+    printf 'HTTP/1.1 %s\r\n' "$code"
+    [ -f "$d/$key.headers" ] && while IFS= read -r h; do printf '%s\r\n' "$h"; done < "$d/$key.headers"
+    printf '\r\n'
+  } > "$hdr"
+fi
+
+body="$d/$key.body"
+[ -f "$body" ] || body=/dev/null
+if [ -n "$out" ]; then cat "$body" > "$out"; else cat "$body"; fi
+[ -n "$fmt" ] && printf '%s' "$code"
+exit 0
